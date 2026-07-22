@@ -1,0 +1,58 @@
+### Exemplos de uso da API RotaTravada
+### (use com a extensão REST Client do VS Code, ou traduza para curl)
+
+@base = http://localhost:3000
+
+### 1. Login (motorista)
+# @name login
+POST {{base}}/api/auth/login
+Content-Type: application/json
+
+{ "email": "motorista@demo.com", "password": "motorista123" }
+
+### guarde o token retornado
+@token = {{login.response.body.token}}
+
+### 2. WEBHOOK: sistema de roteirização externo envia uma rota travada
+### Autenticação por X-API-Key (não JWT). fleet_id=1, driver_id=3 (do seed)
+POST {{base}}/api/routes/ingest
+Content-Type: application/json
+X-API-Key: chave-do-webhook-troque
+
+{
+  "external_ref": "OS-2026-0001",
+  "name": "Entrega Centro Joinville",
+  "fleet_id": 1,
+  "driver_id": 3,
+  "geometry": {
+    "type": "LineString",
+    "coordinates": [
+      [-48.8500, -26.3000],
+      [-48.8480, -26.3005],
+      [-48.8450, -26.3010],
+      [-48.8420, -26.3020]
+    ]
+  }
+}
+
+### 3. Motorista busca a rota atribuída a ele
+GET {{base}}/api/routes/mine
+Authorization: Bearer {{token}}
+
+### 4. Motorista envia ping de telemetria (posição atual)
+POST {{base}}/api/telemetry/ping
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "route_id": 1, "lat": -26.3007, "lng": -48.8470, "speed": 12.5 }
+
+### 5. Login supervisor + ver motoristas ao vivo
+# @name sup
+POST {{base}}/api/auth/login
+Content-Type: application/json
+
+{ "email": "sup@demo.com", "password": "sup123" }
+
+###
+GET {{base}}/api/telemetry/live
+Authorization: Bearer {{sup.response.body.token}}
