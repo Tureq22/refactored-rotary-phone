@@ -7,19 +7,21 @@ import { api } from '../services/api';
 import { getCachedRoute, cacheRoute, downloadTiles } from '../services/offline';
 import { evaluatePosition } from '../services/geofence';
 import { triggerDeviationAlert, initAlertSound } from '../services/alert';
-import { MAP_STYLE_URL, TELEMETRY_INTERVAL_MS, GPS_DISTANCE_FILTER } from '../config';
-
-MapLibreGL.setAccessToken(null); // OSM/MapLibre não precisa de token
+import { MAP_STYLE_URL, TELEMETRY_INTERVAL_MS, GPS_DISTANCE_FILTER, DEFAULT_TOLERANCE_M } from '../config';
 
 export default function DriverMapScreen() {
   const [route, setRoute] = useState(null);
-  const [tolerance, setTolerance] = useState(150);
+  const [tolerance, setTolerance] = useState(DEFAULT_TOLERANCE_M);
   const [pos, setPos] = useState(null);
   const [status, setStatus] = useState({ distanceM: 0, offRoute: false });
   const [downloadPct, setDownloadPct] = useState(null);
 
   const watchId = useRef(null);
   const lastPingRef = useRef(0);
+  // Ref evita o bug de "closure velha": o watchPosition captura o valor
+  // de `tolerance` do momento em que foi criado. Com a ref, o callback
+  // sempre lê o valor mais atual (ex.: admin mudou a tolerância da frota).
+  const toleranceRef = useRef(DEFAULT_TOLERANCE_M);
 
   useEffect(() => {
     initAlertSound();
@@ -28,6 +30,13 @@ export default function DriverMapScreen() {
       if (watchId.current != null) Geolocation.clearWatch(watchId.current);
     };
   }, []);
+
+  function applyTolerance(t) {
+    if (typeof t === 'number' && t > 0) {
+      toleranceRef.current = t;
+      setTolerance(t);
+    }
+  }
 
   async function requestPermission() {
     if (Platform.OS === 'android') {
@@ -49,6 +58,7 @@ export default function DriverMapScreen() {
     try {
       const { data } = await api.get('/routes/mine');
       r = data;
+      applyTolerance(r.tolerance_m); // backend agora envia a tolerância da frota
       await cacheRoute(r);
       // pré-download de tiles da região
       if (r.bbox) {
@@ -57,6 +67,7 @@ export default function DriverMapScreen() {
     } catch (e) {
       r = await getCachedRoute();
       if (!r) return Alert.alert('Sem rota', 'Nenhuma rota disponível (online ou offline).');
+      applyTolerance(r.tolerance_m);
     }
     setRoute(r);
     startTracking(r);
@@ -68,8 +79,8 @@ export default function DriverMapScreen() {
         const coord = { lat: p.coords.latitude, lng: p.coords.longitude };
         setPos(coord);
 
-        // Geofencing linear local (alerta imediato)
-        const evalRes = evaluatePosition(r.geometry, coord, tolerance);
+        // Geofencing linear local (alerta imediato) — lê tolerância da ref
+        const evalRes = evaluatePosition(r.geometry, coord, toleranceRef.current);
         setStatus(evalRes);
         if (evalRes.offRoute) triggerDeviationAlert();
 
@@ -77,7 +88,7 @@ export default function DriverMapScreen() {
         const now = Date.now();
         if (now - lastPingRef.current >= TELEMETRY_INTERVAL_MS) {
           lastPingRef.current = now;
-          sendPing(r.id, coord, p.coords, evalRes);
+          sendPing(r.id, coord, p.coords);
         }
       },
       (err) => console.warn('GPS error', err),
@@ -90,23 +101,24 @@ export default function DriverMapScreen() {
     );
   }
 
-  async function sendPing(routeId, coord, coords, evalRes) {
+  async function sendPing(routeId, coord, coords) {
     try {
-      await api.post('/telemetry/ping', {
+      const { data } = await api.post('/telemetry/ping', {
         route_id: routeId,
         lat: coord.lat,
         lng: coord.lng,
         speed: coords.speed,
         heading: coords.heading,
       });
-      // atualiza tolerância caso o admin tenha mudado
+      // sincroniza tolerância caso o admin tenha mudado no backend
+      applyTolerance(data.tolerance_m);
     } catch (_) {
       // offline: ping é descartado (poderia enfileirar em AsyncStorage se necessário)
     }
   }
 
   async function reportStop() {
-    if (!pos) return;
+    if (!pos || !route) return;
     try {
       await api.post('/telemetry/stop', { route_id: route.id, lat: pos.lat, lng: pos.lng });
       Alert.alert('Parada registrada');
@@ -116,7 +128,7 @@ export default function DriverMapScreen() {
   }
 
   async function justifyDeviation() {
-    if (!pos) return;
+    if (!pos || !route) return;
     try {
       await api.post('/telemetry/deviation', {
         route_id: route.id,

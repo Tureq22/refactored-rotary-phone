@@ -1,4 +1,5 @@
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 
 export function auth(req, res, next) {
   const header = req.headers.authorization || '';
@@ -22,10 +23,14 @@ export function requireRole(...roles) {
   };
 }
 
-// Autenticação do webhook do sistema de roteirização (por API key)
+// Autenticação do webhook do sistema de roteirização (por API key).
+// Comparação em tempo constante para evitar timing attack.
 export function ingestKey(req, res, next) {
-  const key = req.headers['x-api-key'];
-  if (key !== process.env.ROUTE_INGEST_API_KEY) {
+  const key = String(req.headers['x-api-key'] || '');
+  const expected = String(process.env.ROUTE_INGEST_API_KEY || '');
+  const a = crypto.createHash('sha256').update(key).digest();
+  const b = crypto.createHash('sha256').update(expected).digest();
+  if (!expected || !crypto.timingSafeEqual(a, b)) {
     return res.status(401).json({ error: 'API key inválida' });
   }
   next();
