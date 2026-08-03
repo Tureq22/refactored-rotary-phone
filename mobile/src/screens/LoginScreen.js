@@ -3,8 +3,9 @@ import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert } from 'reac
 import { login } from '../services/api';
 
 export default function LoginScreen({ navigation }) {
-  const [email, setEmail] = useState('motorista@demo.com');
-  const [password, setPassword] = useState('motorista123');
+  // Credenciais pré-preenchidas SÓ em desenvolvimento (__DEV__); vazio em produção.
+  const [email, setEmail] = useState(__DEV__ ? 'motorista@demo.com' : '');
+  const [password, setPassword] = useState(__DEV__ ? 'motorista123' : '');
   const [loading, setLoading] = useState(false);
 
   async function handleLogin() {
