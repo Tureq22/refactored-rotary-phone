@@ -63,6 +63,71 @@ router.post(
 );
 
 // ---------------------------------------------------------------
+// Sincronização OFFLINE: recebe em lote os pings que o app guardou
+// enquanto estava sem conexão. Cada ping traz o recorded_at REAL
+// da captura, preservando o histórico do trajeto.
+// ---------------------------------------------------------------
+const batchPingSchema = z.object({
+  route_id: z.number().int().positive(),
+  pings: z
+    .array(
+      z.object({
+        ...latLng,
+        speed: z.number().nullable().optional(),
+        heading: z.number().nullable().optional(),
+        // ISO 8601 com timezone, ex: "2026-08-03T14:22:31.000Z"
+        recorded_at: z.string().datetime({ offset: true }),
+      })
+    )
+    .min(1)
+    .max(500),
+});
+
+router.post(
+  '/ping/batch',
+  auth,
+  requireRole('driver'),
+  asyncHandler(async (req, res) => {
+    const parsed = batchPingSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'Lote inválido' });
+    const { route_id, pings } = parsed.data;
+
+    const route = await getOwnedRoute(route_id, req.user.id);
+    if (!route) return res.status(404).json({ error: 'Rota não encontrada' });
+
+    const coords = route.geometry.coordinates;
+    const tolerance = route.tolerance_m;
+    const now = Date.now();
+
+    // monta INSERT multi-linha parametrizado
+    const values = [];
+    const params = [];
+    let i = 1;
+    for (const p of pings) {
+      const distance = distanceToLine(coords, { lat: p.lat, lng: p.lng });
+      const offRoute = distance > tolerance;
+      // timestamp no futuro (relógio do celular errado) é ajustado para agora
+      let ts = new Date(p.recorded_at);
+      if (ts.getTime() > now) ts = new Date(now);
+      values.push(`($${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++})`);
+      params.push(
+        route_id, req.user.id, p.lat, p.lng,
+        p.speed ?? null, p.heading ?? null,
+        distance, offRoute, ts.toISOString()
+      );
+    }
+
+    await query(
+      `INSERT INTO telemetry (route_id, driver_id, lat, lng, speed, heading, distance_m, off_route, recorded_at)
+       VALUES ${values.join(',')}`,
+      params
+    );
+
+    res.json({ inserted: pings.length, tolerance_m: tolerance });
+  })
+);
+
+// ---------------------------------------------------------------
 // Supervisor/Admin: posições mais recentes de cada motorista da frota
 // ---------------------------------------------------------------
 router.get(
