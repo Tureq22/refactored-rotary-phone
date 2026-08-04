@@ -2,9 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, Platform, PermissionsAndroid } from 'react-native';
 import MapLibreGL from '@maplibre/maplibre-react-native';
 import Geolocation from 'react-native-geolocation-service';
+import NetInfo from '@react-native-community/netinfo';
 
 import { api } from '../services/api';
 import { getCachedRoute, cacheRoute, downloadTiles } from '../services/offline';
+import { enqueuePing, flushQueue, getQueueCount } from '../services/pingQueue';
 import { evaluatePosition } from '../services/geofence';
 import { triggerDeviationAlert, initAlertSound } from '../services/alert';
 import { MAP_STYLE_URL, TELEMETRY_INTERVAL_MS, GPS_DISTANCE_FILTER, DEFAULT_TOLERANCE_M } from '../config';
@@ -15,6 +17,8 @@ export default function DriverMapScreen() {
   const [pos, setPos] = useState(null);
   const [status, setStatus] = useState({ distanceM: 0, offRoute: false });
   const [downloadPct, setDownloadPct] = useState(null);
+  const [isOnline, setIsOnline] = useState(true);
+  const [pendingPings, setPendingPings] = useState(0);
 
   const watchId = useRef(null);
   const lastPingRef = useRef(0);
@@ -26,8 +30,18 @@ export default function DriverMapScreen() {
   useEffect(() => {
     initAlertSound();
     bootstrap();
+    getQueueCount().then(setPendingPings); // pings de viagens anteriores?
+
+    // Quando a conexão volta, sincroniza a fila offline automaticamente
+    const unsubNet = NetInfo.addEventListener((state) => {
+      const online = !!state.isConnected;
+      setIsOnline(online);
+      if (online) syncQueue();
+    });
+
     return () => {
       if (watchId.current != null) Geolocation.clearWatch(watchId.current);
+      unsubNet();
     };
   }, []);
 
@@ -36,6 +50,11 @@ export default function DriverMapScreen() {
       toleranceRef.current = t;
       setTolerance(t);
     }
+  }
+
+  async function syncQueue() {
+    const { remaining } = await flushQueue(api);
+    setPendingPings(remaining);
   }
 
   async function requestPermission() {
@@ -58,7 +77,7 @@ export default function DriverMapScreen() {
     try {
       const { data } = await api.get('/routes/mine');
       r = data;
-      applyTolerance(r.tolerance_m); // backend agora envia a tolerância da frota
+      applyTolerance(r.tolerance_m); // backend envia a tolerância da frota
       await cacheRoute(r);
       // pré-download de tiles da região
       if (r.bbox) {
@@ -79,7 +98,7 @@ export default function DriverMapScreen() {
         const coord = { lat: p.coords.latitude, lng: p.coords.longitude };
         setPos(coord);
 
-        // Geofencing linear local (alerta imediato) — lê tolerância da ref
+        // Geofencing linear local (alerta imediato, funciona 100% offline)
         const evalRes = evaluatePosition(r.geometry, coord, toleranceRef.current);
         setStatus(evalRes);
         if (evalRes.offRoute) triggerDeviationAlert();
@@ -102,18 +121,28 @@ export default function DriverMapScreen() {
   }
 
   async function sendPing(routeId, coord, coords) {
+    const payload = {
+      route_id: routeId,
+      lat: coord.lat,
+      lng: coord.lng,
+      speed: coords.speed,
+      heading: coords.heading,
+    };
     try {
-      const { data } = await api.post('/telemetry/ping', {
-        route_id: routeId,
-        lat: coord.lat,
-        lng: coord.lng,
-        speed: coords.speed,
-        heading: coords.heading,
-      });
+      const { data } = await api.post('/telemetry/ping', payload);
       // sincroniza tolerância caso o admin tenha mudado no backend
       applyTolerance(data.tolerance_m);
+      // ping online passou: aproveita para esvaziar a fila offline, se houver
+      if (pendingPings > 0) syncQueue();
     } catch (_) {
-      // offline: ping é descartado (poderia enfileirar em AsyncStorage se necessário)
+      // SEM CONEXÃO: guarda o ping com o horário REAL da captura.
+      // Quando a rede voltar, o NetInfo dispara a sincronização em lote
+      // e o histórico do trajeto fica completo no backend.
+      const count = await enqueuePing({
+        ...payload,
+        recorded_at: new Date().toISOString(),
+      });
+      setPendingPings(count);
     }
   }
 
@@ -181,6 +210,18 @@ export default function DriverMapScreen() {
         {downloadPct != null && downloadPct < 100 && (
           <Text style={styles.panelText}>Baixando mapa offline: {downloadPct}%</Text>
         )}
+        {/* Indicador de modo offline / sincronização pendente */}
+        {!isOnline && (
+          <Text style={styles.offlineText}>
+            📴 Sem conexão — trajeto sendo salvo no aparelho
+          </Text>
+        )}
+        {isOnline && pendingPings > 0 && (
+          <Text style={styles.syncText}>🔄 Sincronizando {pendingPings} posições…</Text>
+        )}
+        {!isOnline && pendingPings > 0 && (
+          <Text style={styles.offlineText}>{pendingPings} posições aguardando envio</Text>
+        )}
       </View>
 
       <View style={styles.actions}>
@@ -206,6 +247,8 @@ const styles = StyleSheet.create({
   panelAlert: { backgroundColor: 'rgba(239,68,68,0.95)' },
   panelTitle: { color: '#fff', fontWeight: 'bold', fontSize: 18 },
   panelText: { color: '#e2e8f0', marginTop: 4 },
+  offlineText: { color: '#fbbf24', marginTop: 6, fontWeight: 'bold' },
+  syncText: { color: '#38bdf8', marginTop: 6 },
   actions: { position: 'absolute', bottom: 30, left: 12, right: 12, flexDirection: 'row', gap: 10 },
   btn: { flex: 1, backgroundColor: '#334155', padding: 16, borderRadius: 12 },
   btnWarn: { backgroundColor: '#f59e0b' },
