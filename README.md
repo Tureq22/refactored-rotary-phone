@@ -108,6 +108,7 @@ npx react-native run-android   # ou run-ios
 | POST | `/api/routes/ingest` | API key | webhook do roteirizador |
 | GET | `/api/routes/mine` | driver | rota atribuída |
 | POST | `/api/telemetry/ping` | driver | posição periódica |
+| POST | `/api/telemetry/ping/batch` | driver | sincroniza pings salvos offline (histórico) |
 | POST | `/api/telemetry/deviation` | driver | justifica desvio |
 | POST | `/api/telemetry/stop` | driver | sinaliza parada |
 | GET | `/api/telemetry/live` | supervisor/admin | motoristas ao vivo |
